@@ -1,0 +1,84 @@
+name: Build
+# Builds TRoCity from the private korayozrak/game repo and publishes a test release here (owner-approved
+# 2026-10-27: game builds public, source private; public repo = free Actions minutes).
+# Needs the GAME_REPO_TOKEN secret (fine-grained, read-only Contents on korayozrak/game).
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "korayozrak/game branch / tag / commit"
+        default: main
+        required: true
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+env:
+  GODOT_URL: https://github.com/godotengine/godot/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+  GODOT_SHA512: fd52bb4ba8acc30ca5accd1c566d470ad7282f891ccc0995dfafabcf92bcf76280ce182bf9d80ebd885f3ed2165d01e1fc3f2928436b15498dfbd98656c2a45a
+  GODOT: ${{ github.workspace }}/../godot/Godot_v4.3-stable_linux.x86_64
+
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout game (private)
+        uses: actions/checkout@v4
+        with:
+          repository: korayozrak/game
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.GAME_REPO_TOKEN }}
+
+      - name: Install Godot 4.3-stable
+        run: |
+          mkdir -p "$(dirname "$GODOT")" && cd "$(dirname "$GODOT")"
+          curl -fsSL -o godot.zip "$GODOT_URL"
+          echo "$GODOT_SHA512  godot.zip" | sha512sum -c -
+          unzip -q godot.zip && rm godot.zip && chmod +x "$GODOT"
+
+      - name: Cache export templates
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/godot/export_templates/4.3.stable
+          key: godot-export-templates-4.3.stable-linux-windows-macos
+
+      - name: Install wine (rcedit host for the Windows exe icon)
+        timeout-minutes: 15
+        continue-on-error: true
+        run: |
+          for i in 1 2 3; do
+            if timeout 240 sudo apt-get update -q && timeout 240 sudo apt-get install -y -q wine64; then exit 0; fi
+            echo "wine install attempt $i failed, retrying"; sleep 10
+          done
+          exit 1
+
+      - name: Export (Linux + Windows + macOS, smoke test)
+        run: bash tools/export.sh --out=builds --platforms=linux,windows,macos --smoke
+
+      - name: Package zips (Windows + Mac only; no source)
+        id: pkg
+        run: |
+          VER=$(grep -m1 '^config/version=' project.godot | cut -d'"' -f2)
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          mkdir -p dist/TRoCity
+          cp builds/windows/* dist/TRoCity/
+          (cd dist && zip -q -r "TRoCity_Windows_v${VER}_b${{ github.run_number }}.zip" TRoCity && rm -rf TRoCity)
+          cp builds/macos/TRoCity.zip "dist/TRoCity_Mac_v${VER}_b${{ github.run_number }}.zip"
+          ls -lh dist
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "TRoCity v${{ steps.pkg.outputs.ver }} — test sürümü ${{ github.run_number }}"
+          prerelease: true
+          body: |
+            Test sürümü (oyun @ ${{ steps.pkg.outputs.sha }}).
+            Windows: zip'i aç, TRoCity.exe'yi çalıştır (sorun olursa TRoCity_GuvenliMod.bat).
+            Mac: zip'i aç, sonra Terminal'de: xattr -dr com.apple.quarantine "TRoCity.app"
+          files: dist/*.zip
